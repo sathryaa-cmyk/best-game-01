@@ -112,10 +112,47 @@ export class SoundBank {
     tone(this.ctx, { freq: 1040 * Math.pow(1.059, step), dur: 0.09, type: 'triangle', gain: 0.05 });
   }
 
+  /** The combo tier rises: a bright two-note lift over the collect sound. */
+  comboUp() {
+    if (!this.ready()) return;
+    tone(this.ctx, { freq: 1040, dur: 0.08, type: 'triangle', gain: 0.1 });
+    tone(this.ctx, { freq: 1568, dur: 0.12, type: 'triangle', gain: 0.1, when: 0.06 });
+  }
+
   banish() {
     if (!this.ready()) return;
     noise(this.ctx, { dur: 0.22, gain: 0.16, freq: 900 });
     tone(this.ctx, { freq: 320, freqEnd: 90, dur: 0.2, type: 'sawtooth', gain: 0.07 });
+  }
+
+  /** A banished shard cracks apart into two motes: a bright double chirp. */
+  split() {
+    if (!this.ready()) return;
+    tone(this.ctx, { freq: 980, freqEnd: 620, dur: 0.1, type: 'triangle', gain: 0.12 });
+    tone(this.ctx, { freq: 1240, freqEnd: 780, dur: 0.1, type: 'triangle', gain: 0.1, when: 0.07 });
+    noise(this.ctx, { dur: 0.12, gain: 0.1, freq: 2600, when: 0.02 });
+  }
+
+  /** The ember cache arrives and is claimed: a rising golden arpeggio. */
+  cache() {
+    if (!this.ready()) return;
+    [880, 1108, 1318, 1760].forEach((freq, i) => tone(this.ctx, { freq, dur: 0.16, type: 'triangle', gain: 0.1, when: i * 0.07 }));
+  }
+
+  /** A storm wave opens: a low horn swell under the banner. */
+  horn() {
+    if (!this.ready()) return;
+    tone(this.ctx, { freq: 196, freqEnd: 147, dur: 0.55, type: 'sawtooth', gain: 0.08 });
+    tone(this.ctx, { freq: 294, freqEnd: 220, dur: 0.55, type: 'triangle', gain: 0.07, when: 0.05 });
+    noise(this.ctx, { dur: 0.5, gain: 0.05, freq: 500 });
+  }
+
+  /** Banish Nova chains: the banish, then a wider wash of noise. */
+  nova() {
+    if (!this.ready()) return;
+    this.banish();
+    noise(this.ctx, { dur: 0.35, gain: 0.12, freq: 600, when: 0.05 });
+    tone(this.ctx, { freq: 420, freqEnd: 1200, dur: 0.25, type: 'sine', gain: 0.06, when: 0.05 });
   }
 
   hit() {
