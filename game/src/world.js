@@ -1,12 +1,22 @@
 // Emberfall's rules: the Keeper, the falling embers, the hunting wisps,
 // the waves and the blessings between them. One fixed step (1/60 s) at a
 // time; rendering and sound only read this state, they never change it.
+//
+// Round 3 adds: wave themes (storm nights rain embers, swarm nights send
+// more wisps), two new wisp kinds (shards split when banished, shades
+// telegraph and lunge), one ember cache per wave worth chasing, hit-stop
+// and shockwave rings for the banish, and blessings that chain banishes,
+// ward a hit a wave, or save the run once.
 import {
-  VIEW, STEP, TOTAL_WAVES, PLAYER, EMBER, WISP, PICKUP, COMBO, SCORE,
-  waveQuota,
+  VIEW, STEP, TOTAL_WAVES, PLAYER, EMBER, CACHE, WISP, SHADE, PICKUP, COMBO,
+  SCORE, HITSTOP, NOVA_RADIUS, waveQuota,
 } from './config.js';
 import { makeRng, range, pick } from './random.js';
-import { dealBlessings } from './upgrades.js';
+import { dealBlessings, ownedOneTime } from './upgrades.js';
+import {
+  waveTheme, waveQuotaBonus, emberInterval, emberCap, wispTarget, wispInterval,
+  pickWispKind,
+} from './waves.js';
 
 export const SCREEN_TITLE = 'title';
 export const SCREEN_PLAY = 'play';
@@ -58,6 +68,11 @@ function freshPlayer() {
     emberBonus: 0,
     comboWindow: COMBO.window,
     invulnAfterHit: PLAYER.invulnAfterHit,
+    nova: false,
+    flameWard: false,
+    wardUsed: false,
+    secondWind: false,
+    stormCaller: false,
   };
 }
 
@@ -75,9 +90,11 @@ export class World {
     this.score = 0;
     this.best = loadBest();
     this.combo = 0;
+    this.bestCombo = 0;
     this.comboTimer = 0;
     this.mult = 1;
     this.wave = 0;
+    this.waveTime = 0;
     this.quotaLeft = 0;
     this.collected = 0;
     this.banished = 0;
@@ -86,14 +103,19 @@ export class World {
     this.wisps = [];
     this.pickups = [];
     this.particles = [];
+    this.rings = [];
+    this.trail = [];
     this.floaters = [];
     this.emberTimer = 0;
     this.wispTimer = 0;
+    this.cacheSpawned = false;
+    this.hitstop = 0;
     this.shake = 0;
     this.flash = 0;
     this.banner = '';
     this.bannerTimer = 0;
     this.blessings = [];
+    this.rerollsLeft = 0;
     this.stars = [];
     for (let i = 0; i < 110; i += 1) {
       this.stars.push({
@@ -121,6 +143,7 @@ export class World {
   startRun() {
     this.score = 0;
     this.combo = 0;
+    this.bestCombo = 0;
     this.comboTimer = 0;
     this.mult = 1;
     this.collected = 0;
@@ -130,18 +153,29 @@ export class World {
     this.wisps = [];
     this.pickups = [];
     this.particles = [];
+    this.rings = [];
+    this.trail = [];
     this.floaters = [];
+    this.hitstop = 0;
     this.wave = 1;
     this.startWave();
     this.screen = SCREEN_PLAY;
   }
 
   startWave() {
-    this.quotaLeft = waveQuota(this.wave);
+    const theme = waveTheme(this.wave);
+    this.quotaLeft = waveQuota(this.wave) + waveQuotaBonus(this.wave);
+    this.waveTime = 0;
+    this.cacheSpawned = false;
+    this.player.wardUsed = false;
     this.emberTimer = 0.4;
     this.wispTimer = 1.2;
-    this.banner = this.wave === 1 ? 'GATHER THE EMBERS' : `WAVE ${this.wave}`;
+    this.banner = this.wave === 1 ? 'GATHER THE EMBERS' : theme.name;
     this.bannerTimer = 2.2;
+    if (this.player.stormCaller) {
+      for (let i = 0; i < 5; i += 1) this.spawnEmber(true);
+    }
+    if (theme.storm) this.sounds.horn();
   }
 
   pause() {
@@ -166,10 +200,19 @@ export class World {
     this.screen = SCREEN_PLAY;
   }
 
-  spawnEmber() {
+  /** Once per wave, deal a fresh hand of three blessings (never the same cards). */
+  rerollBlessings() {
+    if (this.screen !== SCREEN_UPGRADE || this.rerollsLeft <= 0) return false;
+    this.rerollsLeft -= 1;
+    this.blessings = dealBlessings(this.rng, 3, this.blessings.map((b) => b.id), ownedOneTime(this.player));
+    this.sounds.click();
+    return true;
+  }
+
+  spawnEmber(anywhere = false) {
     this.embers.push({
       x: 30 + this.rng() * (VIEW.width - 60),
-      y: -20,
+      y: anywhere ? -20 - this.rng() * 260 : -20,
       vy: range(this.rng, EMBER.fallMin, EMBER.fallMax),
       sway: range(this.rng, 0.6, 1.6),
       phase: this.rng() * Math.PI * 2,
@@ -178,10 +221,45 @@ export class World {
     });
   }
 
-  spawnWisp() {
-    const kinds = Object.keys(WISP.kinds).filter((k) => this.wave >= WISP.kinds[k].fromWave);
-    const kind = pick(this.rng, kinds);
+  /** The wave's one ember cache: big, slow, golden — and gone in seconds. */
+  spawnCache() {
+    this.cacheSpawned = true;
+    this.embers.push({
+      x: 80 + this.rng() * (VIEW.width - 160),
+      y: -30,
+      vy: 34,
+      sway: 0.8,
+      phase: this.rng() * Math.PI * 2,
+      r: CACHE.radius,
+      kind: 'cache',
+      life: CACHE.lifetime,
+    });
+    this.floater(VIEW.width / 2, 120, 'EMBER CACHE!', '#ffe066');
+    this.sounds.cache();
+  }
+
+  makeWisp(kind, x, y, vx = 0, vy = 0) {
     const def = WISP.kinds[kind];
+    return {
+      kind,
+      x,
+      y,
+      vx,
+      vy,
+      r: def.radius,
+      speed: def.speed + this.wave * WISP.speedPerWave,
+      phase: this.rng() * Math.PI * 2,
+      wobble: range(this.rng, 1.5, 3.2),
+      // Shades run a little state machine: drift, telegraph, lunge.
+      state: kind === 'shade' ? 'drift' : 'chase',
+      stateT: kind === 'shade' ? 2 + this.rng() * 2 : 0,
+      lx: 0,
+      ly: 0,
+    };
+  }
+
+  spawnWisp() {
+    const kind = pickWispKind(this.rng, this.wave);
     const edge = Math.floor(this.rng() * 4);
     let x = 0;
     let y = 0;
@@ -189,17 +267,7 @@ export class World {
     if (edge === 1) { x = this.rng() * VIEW.width; y = VIEW.height + 30; }
     if (edge === 2) { x = -30; y = this.rng() * VIEW.height; }
     if (edge === 3) { x = VIEW.width + 30; y = this.rng() * VIEW.height; }
-    this.wisps.push({
-      kind,
-      x,
-      y,
-      vx: 0,
-      vy: 0,
-      r: def.radius,
-      speed: def.speed + this.wave * WISP.speedPerWave,
-      phase: this.rng() * Math.PI * 2,
-      wobble: range(this.rng, 1.5, 3.2),
-    });
+    this.wisps.push(this.makeWisp(kind, x, y));
   }
 
   spawnPickup(x, y) {
@@ -230,29 +298,62 @@ export class World {
     }
   }
 
+  ring(x, y, color) {
+    this.rings.push({ x, y, color, life: 0.45, maxLife: 0.45 });
+  }
+
   floater(x, y, text, color) {
     this.floaters.push({ x, y, text, color, life: 1.1 });
   }
 
   collectEmber(ember) {
     this.combo += 1;
+    this.bestCombo = Math.max(this.bestCombo, this.combo);
     this.comboTimer = this.player.comboWindow;
-    this.mult = Math.min(COMBO.maxMult, 1 + Math.floor(this.combo / COMBO.perTier));
-    const value = (EMBER.value + this.player.emberBonus + (ember.kind === 'gold' ? 15 : 0)) * this.mult;
+    const nextMult = Math.min(COMBO.maxMult, 1 + Math.floor(this.combo / COMBO.perTier));
+    if (nextMult > this.mult) {
+      this.floater(this.player.x, this.player.y - 34, `COMBO x${nextMult}!`, '#ffd94d');
+      this.shake = Math.max(this.shake, 4);
+      this.sounds.comboUp();
+    }
+    this.mult = nextMult;
+    const isCache = ember.kind === 'cache';
+    const base = isCache ? CACHE.value : EMBER.value + this.player.emberBonus + (ember.kind === 'gold' ? 15 : 0);
+    const value = base * this.mult;
     this.score += value;
     this.collected += 1;
-    this.quotaLeft -= 1;
-    this.floater(ember.x, ember.y - 14, `+${value}`, ember.kind === 'gold' ? '#ffe066' : '#ffd97a');
-    this.burst(ember.x, ember.y, '#ffb347', 10, 150);
+    this.quotaLeft -= isCache ? CACHE.quota : 1;
+    this.floater(
+      ember.x,
+      ember.y - 14,
+      isCache ? `CACHE +${value}` : `+${value}`,
+      ember.kind === 'gold' || isCache ? '#ffe066' : '#ffd97a',
+    );
+    this.burst(ember.x, ember.y, isCache ? '#ffe066' : '#ffb347', isCache ? 18 : 10, isCache ? 220 : 150);
+    if (isCache) this.ring(ember.x, ember.y, '#ffe066');
     this.sounds.collect(this.combo);
   }
 
-  banishWisp(wisp) {
+  banishWisp(wisp, playSound = true) {
     this.score += SCORE.banish(wisp.kind);
     this.banished += 1;
     this.floater(wisp.x, wisp.y - 18, `+${SCORE.banish(wisp.kind)}`, '#c9b8ff');
     this.burst(wisp.x, wisp.y, '#9d7bff', 16, 220);
-    this.sounds.banish();
+    this.ring(wisp.x, wisp.y, '#b79bff');
+    this.hitstop = Math.max(this.hitstop, HITSTOP.banish);
+    // The dash that banished this wisp plays the sound once, for the
+    // whole chain — a nova's wash, or a plain banish.
+    if (playSound) this.sounds.banish();
+    if (wisp.kind === 'shard') {
+      // A banished shard bursts into two motes, flying off sideways.
+      this.sounds.split();
+      this.floater(wisp.x, wisp.y - 38, 'SPLIT!', '#ff6ad5');
+      const away = Math.atan2(this.player.y - wisp.y, this.player.x - wisp.x);
+      for (const side of [-1, 1]) {
+        const a = away + side * 2.2;
+        this.wisps.push(this.makeWisp('mote', wisp.x, wisp.y, Math.cos(a) * 230, Math.sin(a) * 230));
+      }
+    }
     if (this.rng() < WISP.dropChance) this.spawnPickup(wisp.x, wisp.y);
   }
 
@@ -267,10 +368,19 @@ export class World {
       this.sounds.pickup();
       return;
     }
+    if (p.flameWard && !p.wardUsed) {
+      p.wardUsed = true;
+      p.invulnLeft = 1.2;
+      this.floater(p.x, p.y - 30, 'WARD!', '#ffe9a8');
+      this.ring(p.x, p.y, '#ffe9a8');
+      this.sounds.pickup();
+      return;
+    }
     p.flames -= 1;
     p.invulnLeft = p.invulnAfterHit;
     this.shake = 14;
     this.flash = 0.55;
+    this.hitstop = Math.max(this.hitstop, HITSTOP.hit);
     this.combo = 0;
     this.mult = 1;
     this.comboTimer = 0;
@@ -281,12 +391,28 @@ export class World {
     p.vy = (dy / len) * 520;
     this.burst(p.x, p.y, '#ff5a6e', 22, 260);
     this.sounds.hit();
-    if (p.flames <= 0) this.gameOver();
+    if (p.flames <= 0) {
+      if (p.secondWind) {
+        // One last spark: the run is saved at a single flame.
+        p.secondWind = false;
+        p.flames = 1;
+        p.invulnLeft = 2.0;
+        this.hitstop = Math.max(this.hitstop, HITSTOP.secondWind);
+        this.shake = 18;
+        this.floater(p.x, p.y - 34, 'SECOND WIND!', '#ffe066');
+        this.burst(p.x, p.y, '#ffe066', 30, 300);
+        this.ring(p.x, p.y, '#ffe066');
+        this.sounds.victory();
+        return;
+      }
+      this.gameOver();
+    }
   }
 
   gameOver() {
     this.screen = SCREEN_OVER;
     this.bannerTimer = 0;
+    this.floaters = [];
     if (this.score > this.best) {
       this.best = this.score;
       saveBest(this.best);
@@ -297,6 +423,7 @@ export class World {
   victory() {
     this.screen = SCREEN_VICTORY;
     this.bannerTimer = 0;
+    this.floaters = [];
     this.score += 500;
     if (this.score > this.best) {
       this.best = this.score;
@@ -308,13 +435,17 @@ export class World {
   waveClear() {
     this.score += SCORE.waveClearBonus(this.wave);
     this.sounds.waveClear();
+    this.burst(this.player.x, this.player.y, '#ffe066', 30, 280);
+    this.ring(this.player.x, this.player.y, '#ffe9a8');
+    this.floater(this.player.x, this.player.y - 40, `WAVE CLEAR +${SCORE.waveClearBonus(this.wave)}`, '#ffe066');
     this.embers = [];
     this.wisps = [];
     if (this.wave >= TOTAL_WAVES) {
       this.victory();
       return;
     }
-    this.blessings = dealBlessings(this.rng, 3);
+    this.blessings = dealBlessings(this.rng, 3, [], ownedOneTime(this.player));
+    this.rerollsLeft = 1;
     this.screen = SCREEN_UPGRADE;
   }
 
@@ -331,6 +462,16 @@ export class World {
       pt.vy *= 0.96;
       pt.life -= dt;
       if (pt.life <= 0) this.particles.splice(i, 1);
+    }
+    for (let i = this.rings.length - 1; i >= 0; i -= 1) {
+      const r = this.rings[i];
+      r.life -= dt;
+      if (r.life <= 0) this.rings.splice(i, 1);
+    }
+    for (let i = this.trail.length - 1; i >= 0; i -= 1) {
+      const g = this.trail[i];
+      g.life -= dt;
+      if (g.life <= 0) this.trail.splice(i, 1);
     }
     for (let i = this.floaters.length - 1; i >= 0; i -= 1) {
       const f = this.floaters[i];
@@ -358,21 +499,31 @@ export class World {
   }
 
   stepPlay(dt, input) {
+    // Hit-stop: the world holds still for a beat after a banish or a hit.
+    if (this.hitstop > 0) {
+      this.hitstop -= dt;
+      return 0;
+    }
     const p = this.player;
     const scale = this.timeScale;
     const sdt = dt * scale;
+    this.waveTime += sdt;
 
     // --- Spawning ---
     this.emberTimer -= sdt;
-    if (this.emberTimer <= 0 && this.embers.length < EMBER.maxAlive) {
+    if (this.emberTimer <= 0 && this.embers.length < emberCap(this.wave)) {
       this.spawnEmber();
       this.emberTimer = Math.max(EMBER.spawnMin, EMBER.spawnBase - this.wave * EMBER.spawnPerWave);
+      this.emberTimer = emberInterval(this.wave, this.emberTimer);
+    }
+    if (this.wave >= CACHE.fromWave && !this.cacheSpawned && this.waveTime > CACHE.delay) {
+      this.spawnCache();
     }
     this.wispTimer -= sdt;
-    const targetWisps = WISP.countForWave(this.wave);
+    const targetWisps = wispTarget(this.wave);
     if (this.wispTimer <= 0 && this.wisps.length < targetWisps) {
       this.spawnWisp();
-      this.wispTimer = WISP.spawnInterval;
+      this.wispTimer = wispInterval(this.wave);
     }
 
     // --- Player movement: keyboard, else the mouse when it moved lately ---
@@ -408,6 +559,7 @@ export class World {
       p.dashTimeLeft -= dt;
       p.vx = p.dirX * PLAYER.dashSpeed;
       p.vy = p.dirY * PLAYER.dashSpeed;
+      this.trail.push({ x: p.x, y: p.y, life: 0.28, dirX: p.dirX });
     } else {
       p.vx += mx * PLAYER.accel * dt;
       p.vy += my * PLAYER.accel * dt;
@@ -473,16 +625,60 @@ export class World {
         tx /= tl;
         ty /= tl;
       }
-      const steer = w.kind === 'brute' ? 1.6 : 3.2;
-      w.vx += (tx * w.speed - w.vx) * Math.min(1, steer * sdt);
-      w.vy += (ty * w.speed - w.vy) * Math.min(1, steer * sdt);
+      if (w.kind === 'shade') {
+        // Drift almost unseen, telegraph, then lunge at the Keeper.
+        if (w.state === 'drift') {
+          w.stateT -= sdt;
+          tx *= 0.55;
+          ty *= 0.55;
+          if (w.stateT <= 0) {
+            w.state = 'telegraph';
+            w.stateT = SHADE.telegraph;
+          }
+        } else if (w.state === 'telegraph') {
+          w.stateT -= sdt;
+          tx = 0;
+          ty = 0;
+          if (w.stateT <= 0) {
+            w.state = 'lunge';
+            w.stateT = SHADE.lungeTime;
+            w.lx = dx / d;
+            w.ly = dy / d;
+          }
+        } else if (w.state === 'lunge') {
+          w.stateT -= sdt;
+          tx = w.lx;
+          ty = w.ly;
+          if (w.stateT <= 0) {
+            w.state = 'drift';
+            w.stateT = 2.5 + this.rng() * 2;
+          }
+        }
+      }
+      const steer = w.kind === 'brute' ? 1.6 : w.kind === 'shade' && w.state === 'lunge' ? 14 : 3.2;
+      const chase = w.kind === 'shade' && w.state === 'lunge' ? SHADE.lungeSpeed : w.speed;
+      w.vx += (tx * chase - w.vx) * Math.min(1, steer * sdt);
+      w.vy += (ty * chase - w.vy) * Math.min(1, steer * sdt);
       w.x += w.vx * sdt;
       w.y += w.vy * sdt;
       const dist = Math.hypot(p.x - w.x, p.y - w.y);
       if (dist < p.radius + w.r) {
         if (p.dashTimeLeft > 0) {
-          this.banishWisp(w);
-          this.wisps.splice(i, 1);
+          // A dash banishes this wisp — and, with Banish Nova, its neighbours too.
+          const victims = [w];
+          if (p.nova) {
+            for (const other of this.wisps) {
+              if (other !== w && Math.hypot(other.x - w.x, other.y - w.y) < NOVA_RADIUS) victims.push(other);
+            }
+          }
+          for (const v of victims) {
+            this.banishWisp(v, false);
+            const at = this.wisps.indexOf(v);
+            if (at >= 0) this.wisps.splice(at, 1);
+          }
+          if (victims.length > 1) this.sounds.nova();
+          else this.sounds.banish();
+          break;
         } else {
           this.hitPlayer(w);
           if (this.screen !== SCREEN_PLAY) return EVENT_OVER;
@@ -519,6 +715,14 @@ export class World {
       const e = this.embers[i];
       e.y += e.vy * dt;
       e.x += Math.sin(this.time * e.sway + e.phase) * 18 * dt;
+      if (e.kind === 'cache') {
+        e.life -= dt;
+        if (e.life <= 0) {
+          this.burst(e.x, e.y, '#ffe066', 8, 120);
+          this.embers.splice(i, 1);
+          continue;
+        }
+      }
       if (e.y > VIEW.height + 24) this.embers.splice(i, 1);
     }
   }
