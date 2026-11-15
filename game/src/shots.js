@@ -3,17 +3,22 @@
 // steps, steered by a simple autopilot (chase the nearest ember, flee a
 // wisp that gets too close, dash through one that corners it), so the
 // frame is what a short game really looks like and the same seed always
-// gives the same frame. The victory scene starts the last wave one ember
-// short of its quota, so the frame is the real victory screen the rules
-// produce; the game-over scene's pilot never dashes and never flees, so
-// the wisps catch it as they would a hurried player.
+// gives the same frame. The play scene fast-forwards through the opening
+// waves to wave 4, where the shard wisps join — the cover should show
+// the game with its depth on, not its first quiet seconds. The victory
+// scene starts the last wave one ember short of its quota, so the frame
+// is the real victory screen the rules produce; the game-over scene's
+// pilot never dashes and never flees, so the wisps catch it as they
+// would a hurried player.
 import { STEP, VIEW } from './config.js';
 import {
   SCREEN_OVER, SCREEN_PLAY, SCREEN_TITLE, SCREEN_UPGRADE, SCREEN_VICTORY,
 } from './world.js';
 
 const START_SECONDS = 5;
-const PLAY_SECONDS = 26;
+const PLAY_TARGET_WAVE = 4;
+const PLAY_HOLD_SECONDS = 10;
+const FAST_FORWARD_LIMIT_SECONDS = 180;
 const END_LIMIT_SECONDS = 600;
 const SAMPLE_HORIZON = 0.9;
 
@@ -87,6 +92,18 @@ function autopilot(world, flee, useDash) {
 }
 
 /**
+ * One autopilot step, taking the first blessing whenever a wave clears.
+ * Returns false when the run has ended (game over or victory).
+ */
+function pilotStep(world) {
+  const input = autopilot(world, true, true);
+  world.step(STEP, input);
+  input.endStep();
+  if (world.screen === SCREEN_UPGRADE) world.chooseBlessing(0);
+  return world.screen === SCREEN_PLAY;
+}
+
+/**
  * Set `world` to the named scene and return the screen to draw over it.
  */
 export function stageShot(name, world, seed) {
@@ -106,6 +123,7 @@ export function stageShot(name, world, seed) {
     // victory screen shows the stats such a run earns.
     world.collected = 158;
     world.banished = 41;
+    world.bestCombo = 24;
     world.time = 512;
     world.score = 3200;
     world.embers.push({
@@ -131,21 +149,47 @@ export function stageShot(name, world, seed) {
     return { screen: world.screen === SCREEN_VICTORY ? SCREEN_VICTORY : SCREEN_PLAY };
   }
   world.startRun();
-  const limit = name === 'over' ? END_LIMIT_SECONDS : PLAY_SECONDS;
-  const flee = name !== 'over';
-  const useDash = name !== 'over';
-  for (let i = 0; i < limit / STEP; i += 1) {
-    // The game-over scene's pilot freezes: it never moves, never dashes
-    // and never flees, so the hunting wisps catch it as they would a
-    // player who panicked — three hits and the light is out.
-    const input = name === 'over' ? new PilotInput() : autopilot(world, flee, useDash);
-    world.step(STEP, input);
-    input.endStep();
-    if (world.screen === SCREEN_OVER) break;
-    if (world.screen === SCREEN_UPGRADE) {
-      // A cleared wave mid-scene: take the first blessing and keep playing.
-      world.chooseBlessing(0);
+  if (name === 'over') {
+    for (let i = 0; i < END_LIMIT_SECONDS / STEP; i += 1) {
+      // The game-over scene's pilot freezes: it never moves, never dashes
+      // and never flees, so the hunting wisps catch it as they would a
+      // player who panicked — three hits and the light is out.
+      world.step(STEP, new PilotInput());
+      if (world.screen === SCREEN_OVER) break;
     }
+    return { screen: world.screen === SCREEN_OVER ? SCREEN_OVER : SCREEN_PLAY };
+  }
+  // Play: fast-forward through the opening waves to the target wave,
+  // then hold there a few seconds so the frame is mid-wave, mid-action.
+  let guard = 0;
+  while (world.wave < PLAY_TARGET_WAVE && guard < FAST_FORWARD_LIMIT_SECONDS / STEP) {
+    if (!pilotStep(world)) break;
+    guard += 1;
+  }
+  if (world.screen === SCREEN_OVER) {
+    // The pilot lost on the way up: stage the target wave directly from
+    // the same seed, so the cover still shows the game at its depth.
+    world.reset(seed);
+    world.startRun();
+    world.wave = PLAY_TARGET_WAVE;
+    world.startWave();
+  }
+  if (world.screen === SCREEN_PLAY) {
+    for (let i = 0; i < PLAY_HOLD_SECONDS / STEP; i += 1) {
+      if (!pilotStep(world)) break;
+    }
+  }
+  // Never ship an empty frame: if the hold ended on a wave transition,
+  // play on until embers are falling and wisps are hunting again.
+  if (world.screen === SCREEN_UPGRADE) world.chooseBlessing(0);
+  let settle = 0;
+  while (
+    world.screen === SCREEN_PLAY
+    && (world.embers.length < 4 || world.wisps.length < 2)
+    && settle < 15 / STEP
+  ) {
+    if (!pilotStep(world)) break;
+    settle += 1;
   }
   if (world.screen === SCREEN_OVER) return { screen: SCREEN_OVER };
   return { screen: SCREEN_PLAY };
