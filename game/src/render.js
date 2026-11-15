@@ -2,7 +2,13 @@
 // indigo, warm amber embers, violet wisps, and the Keeper's lantern light.
 // Screens (title, upgrade, pause, victory, game over) are drawn here too,
 // so the screenshots show the whole game, not just play.
+//
+// Round 3: the sky warms toward dawn as waves clear (see waves.js), the
+// new wisp kinds and the ember cache have their own art, dashes leave
+// afterimages, banishes leave shockwave rings, and each blessing card
+// carries its glyph.
 import { VIEW, COLORS, TOTAL_WAVES } from './config.js';
+import { wavePalette, waveTheme } from './waves.js';
 import {
   SCREEN_TITLE, SCREEN_PLAY, SCREEN_UPGRADE, SCREEN_PAUSE,
   SCREEN_VICTORY, SCREEN_OVER,
@@ -15,6 +21,7 @@ export const END_AGAIN_BUTTON = { x: 470, y: 528, w: 340, h: 60 };
 export const END_TITLE_BUTTON = { x: 520, y: 604, w: 240, h: 44 };
 export const PAUSE_RESUME_BUTTON = { x: 470, y: 372, w: 340, h: 56 };
 export const PAUSE_QUIT_BUTTON = { x: 520, y: 444, w: 240, h: 44 };
+export const REROLL_BUTTON = { x: 540, y: 556, w: 200, h: 44 };
 
 export function upgradeCardRect(index) {
   return { x: 170 + index * 320, y: 296, w: 300, h: 236 };
@@ -41,16 +48,18 @@ function glowCircle(ctx, x, y, r, inner, outer) {
 }
 
 function drawBackground(ctx, world) {
+  const pal = wavePalette(Math.max(1, world.wave));
   const g = ctx.createLinearGradient(0, 0, 0, VIEW.height);
-  g.addColorStop(0, COLORS.skyTop);
-  g.addColorStop(0.55, COLORS.skyMid);
-  g.addColorStop(1, COLORS.skyBottom);
+  g.addColorStop(0, pal.skyTop);
+  g.addColorStop(0.55, pal.skyMid);
+  g.addColorStop(1, pal.skyBottom);
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, VIEW.width, VIEW.height);
 
+  // The stars fade a little as the dawn comes in.
   for (const star of world.stars) {
     const tw = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(world.time * 1.4 + star.phase));
-    ctx.globalAlpha = tw * 0.9;
+    ctx.globalAlpha = tw * 0.9 * (1 - pal.dawn * 0.45);
     ctx.fillStyle = '#dfe6ff';
     ctx.beginPath();
     ctx.arc(star.x, star.y, star.r, 0, Math.PI * 2);
@@ -77,6 +86,18 @@ function drawBackground(ctx, world) {
   ctx.closePath();
   ctx.fill();
 
+  // Dawn glow hugging the horizon, stronger with every wave cleared.
+  if (pal.dawn > 0) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const dg = ctx.createRadialGradient(640, 730, 40, 640, 730, 560);
+    dg.addColorStop(0, `rgba(255,170,90,${0.10 + pal.dawn * 0.30})`);
+    dg.addColorStop(1, 'rgba(255,170,90,0)');
+    ctx.fillStyle = dg;
+    ctx.fillRect(0, 300, VIEW.width, 420);
+    ctx.restore();
+  }
+
   // Fireflies drifting through the garden.
   for (const f of world.fireflies) {
     const x = f.x + Math.sin(world.time * f.speed + f.phase) * 30;
@@ -90,37 +111,93 @@ function drawBackground(ctx, world) {
 
 function drawEmber(ctx, e, time) {
   const gold = e.kind === 'gold';
+  const cache = e.kind === 'cache';
   const pulse = 1 + 0.12 * Math.sin(time * 5 + e.phase);
   const r = e.r * pulse * (gold ? 1.25 : 1);
+  // A cache fades out in its last two seconds: blink the whole thing,
+  // orb and ring alike, instead of vanishing it.
+  const blink = cache && e.life !== undefined && e.life < 2 ? (Math.sin(time * 12) > 0 ? 1 : 0.4) : 1;
   ctx.save();
-  ctx.globalCompositeOperation = 'lighter';
-  glowCircle(ctx, e.x, e.y, r * 3.2, gold ? 'rgba(255,214,80,0.55)' : 'rgba(255,179,71,0.4)', 'rgba(255,179,71,0)');
-  ctx.restore();
+  ctx.globalAlpha = blink;
+  if (cache) {
+    // A slow-turning ring of sparks marks the prize.
+    ctx.globalCompositeOperation = 'lighter';
+    glowCircle(ctx, e.x, e.y, r * 3.6, 'rgba(255,214,80,0.6)', 'rgba(255,214,80,0)');
+    ctx.restore();
+    ctx.save();
+    ctx.globalAlpha = blink;
+    ctx.strokeStyle = 'rgba(255,224,102,0.9)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(e.x, e.y, r + 12 + Math.sin(time * 3) * 3, 0, Math.PI * 2);
+    ctx.stroke();
+    for (let i = 0; i < 6; i += 1) {
+      const a = (i / 6) * Math.PI * 2 + time * 1.4;
+      ctx.fillStyle = '#ffe066';
+      ctx.beginPath();
+      ctx.arc(e.x + Math.cos(a) * (r + 12), e.y + Math.sin(a) * (r + 12), 2.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  } else {
+    ctx.globalCompositeOperation = 'lighter';
+    glowCircle(ctx, e.x, e.y, r * 3.2, gold ? 'rgba(255,214,80,0.55)' : 'rgba(255,179,71,0.4)', 'rgba(255,179,71,0)');
+    ctx.restore();
+    ctx.save();
+  }
   const g = ctx.createRadialGradient(e.x - 2, e.y - 2, 0, e.x, e.y, r);
-  g.addColorStop(0, gold ? '#fff7ae' : COLORS.emberCore);
-  g.addColorStop(0.55, gold ? '#ffd94d' : COLORS.ember);
-  g.addColorStop(1, gold ? '#ff9d2e' : '#e07b1f');
+  g.addColorStop(0, gold || cache ? '#fff7ae' : COLORS.emberCore);
+  g.addColorStop(0.55, gold || cache ? '#ffd94d' : COLORS.ember);
+  g.addColorStop(1, gold || cache ? '#ff9d2e' : '#e07b1f');
   ctx.fillStyle = g;
   ctx.beginPath();
   ctx.arc(e.x, e.y, r, 0, Math.PI * 2);
   ctx.fill();
+  if (cache) {
+    ctx.fillStyle = '#7a5200';
+    ctx.font = 'bold 11px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('CACHE', e.x, e.y + 1);
+  }
+  ctx.restore();
 }
 
 function drawWisp(ctx, w, time) {
-  const color = w.kind === 'mote' ? COLORS.mote : w.kind === 'brute' ? COLORS.brute : COLORS.wisp;
-  // Trailing tail.
+  const color = w.kind === 'mote' ? COLORS.mote
+    : w.kind === 'shard' ? COLORS.shard
+    : w.kind === 'brute' ? COLORS.brute
+    : w.kind === 'shade' ? COLORS.shade
+    : COLORS.wisp;
+  // A shade is barely there while it drifts, and glares while it lunges.
+  let alpha = 1;
+  if (w.kind === 'shade') {
+    if (w.state === 'drift') alpha = 0.38;
+    else if (w.state === 'telegraph') alpha = 0.65 + 0.35 * Math.sin(time * 22);
+    else alpha = 1;
+  }
   ctx.save();
+  ctx.globalAlpha = alpha;
+  // Trailing tail.
   ctx.globalCompositeOperation = 'lighter';
   const tailLen = 3;
   for (let i = 1; i <= tailLen; i += 1) {
     const t = i / (tailLen + 1);
     const x = w.x - w.vx * 0.03 * i;
     const y = w.y - w.vy * 0.03 * i;
-    ctx.globalAlpha = 0.35 * (1 - t);
+    ctx.globalAlpha = alpha * 0.35 * (1 - t);
     glowCircle(ctx, x, y, w.r * (1 - t * 0.5), color, 'rgba(0,0,0,0)');
   }
   ctx.restore();
-  ctx.globalAlpha = 1;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  // A shade telegraphs its lunge with a warning ring.
+  if (w.kind === 'shade' && w.state === 'telegraph') {
+    ctx.strokeStyle = 'rgba(255,90,110,0.9)';
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.arc(w.x, w.y, w.r + 9 + Math.sin(time * 22) * 3, 0, Math.PI * 2);
+    ctx.stroke();
+  }
   // Body: dark orb with a violet rim.
   const g = ctx.createRadialGradient(w.x - 4, w.y - 5, 2, w.x, w.y, w.r);
   g.addColorStop(0, '#2a1b52');
@@ -141,14 +218,37 @@ function drawWisp(ctx, w, time) {
       ctx.stroke();
     }
   }
-  // Eyes: two pale dots that track the Keeper.
-  const ex = w.vx * 0.01;
-  const ey = w.vy * 0.01;
-  ctx.fillStyle = '#efe6ff';
-  ctx.beginPath();
-  ctx.arc(w.x - 6 + ex, w.y - 3 + ey, 2.6, 0, Math.PI * 2);
-  ctx.arc(w.x + 6 + ex, w.y - 3 + ey, 2.6, 0, Math.PI * 2);
-  ctx.fill();
+  if (w.kind === 'shard') {
+    // Three pink shards turn slowly inside the orb: split me and they fly.
+    ctx.fillStyle = '#ff9fe0';
+    for (let i = 0; i < 3; i += 1) {
+      const a = (i / 3) * Math.PI * 2 + time * 1.2;
+      ctx.beginPath();
+      ctx.moveTo(w.x + Math.cos(a) * w.r * 0.55, w.y + Math.sin(a) * w.r * 0.55);
+      ctx.lineTo(w.x + Math.cos(a + 0.5) * w.r * 0.2, w.y + Math.sin(a + 0.5) * w.r * 0.2);
+      ctx.lineTo(w.x + Math.cos(a - 0.5) * w.r * 0.2, w.y + Math.sin(a - 0.5) * w.r * 0.2);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+  if (w.kind === 'shade') {
+    // A shade's eyes are the only bright thing about it while it drifts.
+    ctx.fillStyle = w.state === 'drift' ? '#cfc4ff' : '#ff5a6e';
+    ctx.beginPath();
+    ctx.arc(w.x - 5, w.y - 2, 2.2, 0, Math.PI * 2);
+    ctx.arc(w.x + 5, w.y - 2, 2.2, 0, Math.PI * 2);
+    ctx.fill();
+  } else {
+    // Eyes: two pale dots that track the Keeper.
+    const ex = w.vx * 0.01;
+    const ey = w.vy * 0.01;
+    ctx.fillStyle = '#efe6ff';
+    ctx.beginPath();
+    ctx.arc(w.x - 6 + ex, w.y - 3 + ey, 2.6, 0, Math.PI * 2);
+    ctx.arc(w.x + 6 + ex, w.y - 3 + ey, 2.6, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
 }
 
 function drawPickup(ctx, pk, time) {
@@ -178,6 +278,20 @@ function drawPickup(ctx, pk, time) {
   ctx.font = '11px system-ui, sans-serif';
   ctx.fillStyle = '#8ef2ff';
   ctx.fillText(pk.kind.toUpperCase(), pk.x, y + pk.r + 14);
+}
+
+function drawTrail(ctx, world) {
+  // Dash afterimages: the Keeper's cloak, fading where it has just been.
+  ctx.save();
+  for (const g of world.trail) {
+    ctx.globalAlpha = (g.life / 0.28) * 0.35;
+    ctx.fillStyle = '#6b4fa0';
+    ctx.beginPath();
+    ctx.ellipse(g.x, g.y, 14, 18, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+  ctx.globalAlpha = 1;
 }
 
 function drawPlayer(ctx, world) {
@@ -243,6 +357,16 @@ function drawPlayer(ctx, world) {
     ctx.arc(p.x, p.y, 30 + Math.sin(world.time * 4) * 2, 0, Math.PI * 2);
     ctx.stroke();
   }
+  // Flame Ward: a soft gold ring that says the next hit is free.
+  if (p.flameWard && !p.wardUsed) {
+    ctx.strokeStyle = 'rgba(255,233,168,0.6)';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 6]);
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 34, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
   ctx.restore();
 }
 
@@ -255,6 +379,22 @@ function drawParticles(ctx, world) {
     ctx.beginPath();
     ctx.arc(pt.x, pt.y, pt.size, 0, Math.PI * 2);
     ctx.fill();
+  }
+  ctx.restore();
+  ctx.globalAlpha = 1;
+}
+
+function drawRings(ctx, world) {
+  // Shockwave rings from a banish or a wave clear, expanding and fading.
+  ctx.save();
+  for (const r of world.rings) {
+    const t = 1 - r.life / r.maxLife;
+    ctx.globalAlpha = Math.max(0, r.life / r.maxLife);
+    ctx.strokeStyle = r.color;
+    ctx.lineWidth = 3 * (1 - t) + 1;
+    ctx.beginPath();
+    ctx.arc(r.x, r.y, 12 + t * 74, 0, Math.PI * 2);
+    ctx.stroke();
   }
   ctx.restore();
   ctx.globalAlpha = 1;
@@ -299,6 +439,7 @@ function drawFlame(ctx, x, y, lit, size = 9) {
 
 function drawHud(ctx, world) {
   const p = world.player;
+  const theme = waveTheme(world.wave);
   ctx.save();
   // Top bar.
   ctx.fillStyle = 'rgba(8,8,24,0.55)';
@@ -318,11 +459,11 @@ function drawHud(ctx, world) {
   ctx.fillText(String(Math.max(world.best, world.score)), 92, 46);
   ctx.globalAlpha = 1;
 
-  // Wave + quota, centred.
+  // Wave + its theme, centred.
   ctx.textAlign = 'center';
   ctx.font = 'bold 15px system-ui, sans-serif';
-  ctx.fillText(`WAVE ${world.wave} / ${TOTAL_WAVES}`, 640, 18);
-  const quotaTotal = 6 + world.wave * 2;
+  ctx.fillText(`WAVE ${world.wave} / ${TOTAL_WAVES}  ·  ${theme.name}`, 640, 18);
+  const quotaTotal = 6 + world.wave * 2 + (theme.storm ? 4 : 0);
   const got = quotaTotal - world.quotaLeft;
   const barW = 260;
   const barX = 640 - barW / 2;
@@ -404,6 +545,19 @@ function drawBanner(ctx, world) {
   ctx.restore();
 }
 
+function drawHint(ctx, world) {
+  // First-wave onboarding, until the Keeper has gathered three embers.
+  if (world.screen !== SCREEN_PLAY || world.wave !== 1 || world.collected >= 3) return;
+  ctx.save();
+  ctx.globalAlpha = 0.75 + 0.25 * Math.sin(world.time * 3);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = COLORS.hud;
+  ctx.font = '16px system-ui, sans-serif';
+  ctx.fillText('Gather the glowing embers  ·  dash through a wisp (SPACE / click) to banish it', 640, 640);
+  ctx.restore();
+}
+
 function panel(ctx, x, y, w, h) {
   ctx.fillStyle = 'rgba(10,10,30,0.72)';
   ctx.strokeStyle = 'rgba(255,217,122,0.35)';
@@ -451,11 +605,13 @@ function drawTitle(ctx, world) {
   ctx.globalAlpha = 0.9;
   ctx.fillText('Move — WASD / arrows or mouse      Dash (banishes wisps) — SPACE or click', 640, 402);
   ctx.fillText('P — pause      M — sound on/off      R — restart', 640, 428);
+  ctx.fillStyle = '#ffd94d';
+  ctx.fillText('Storm waves · splitting shards · lurking shades · ember caches · nova blessings', 640, 454);
   ctx.globalAlpha = 1;
   if (world.best > 0) {
     ctx.font = 'bold 16px system-ui, sans-serif';
     ctx.fillStyle = '#ffd94d';
-    ctx.fillText(`BEST SCORE  ${world.best}`, 640, 470);
+    ctx.fillText(`BEST SCORE  ${world.best}`, 640, 482);
   }
   button(ctx, TITLE_BUTTON, 'BEGIN THE KEEP');
   ctx.font = '13px system-ui, sans-serif';
@@ -484,15 +640,26 @@ function drawUpgrade(ctx, world) {
     panel(ctx, r.x, r.y, r.w, r.h);
     ctx.fillStyle = '#ffd94d';
     ctx.font = 'bold 15px system-ui, sans-serif';
-    ctx.fillText(`BLESSING ${i + 1}`, r.x + r.w / 2, r.y + 34);
+    ctx.fillText(`BLESSING ${i + 1}`, r.x + r.w / 2, r.y + 28);
+    // The blessing's glyph medallion.
+    ctx.fillStyle = 'rgba(255,217,122,0.16)';
+    ctx.strokeStyle = '#ffd94d';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(r.x + r.w / 2, r.y + 62, 18, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#ffe9a8';
+    ctx.font = 'bold 13px system-ui, sans-serif';
+    ctx.fillText(b.glyph, r.x + r.w / 2, r.y + 63);
     ctx.fillStyle = '#ffe9a8';
     ctx.font = 'bold 25px Georgia, serif';
-    ctx.fillText(b.name, r.x + r.w / 2, r.y + 78);
+    ctx.fillText(b.name, r.x + r.w / 2, r.y + 102);
     ctx.fillStyle = COLORS.hud;
     ctx.font = '16px system-ui, sans-serif';
     const words = b.desc.split(' ');
     let line = '';
-    let y = r.y + 128;
+    let y = r.y + 148;
     for (const word of words) {
       if ((line + ' ' + word).trim().length > 26) {
         ctx.fillText(line.trim(), r.x + r.w / 2, y);
@@ -507,6 +674,13 @@ function drawUpgrade(ctx, world) {
     ctx.font = '13px system-ui, sans-serif';
     ctx.fillText(`press ${i + 1}`, r.x + r.w / 2, r.y + r.h - 26);
   });
+  if (world.rerollsLeft > 0) {
+    button(ctx, REROLL_BUTTON, 'REROLL  (R)');
+  } else {
+    ctx.fillStyle = 'rgba(245,238,218,0.45)';
+    ctx.font = '13px system-ui, sans-serif';
+    ctx.fillText('reroll used this wave', REROLL_BUTTON.x + REROLL_BUTTON.w / 2, REROLL_BUTTON.y + 22);
+  }
   ctx.restore();
 }
 
@@ -553,6 +727,7 @@ function drawEnd(ctx, world, victory) {
     ['WAVE REACHED', victory ? '10 / 10' : `${world.wave} / ${TOTAL_WAVES}`],
     ['EMBERS GATHERED', String(world.collected)],
     ['WISPS BANISHED', String(world.banished)],
+    ['BEST COMBO', `x${world.bestCombo}`],
     ['TIME', fmtTime(world.time)],
   ];
   ctx.font = 'bold 16px system-ui, sans-serif';
@@ -580,8 +755,10 @@ export function drawWorld(ctx, world) {
   for (const e of world.embers) drawEmber(ctx, e, world.time);
   for (const pk of world.pickups) drawPickup(ctx, pk, world.time);
   for (const w of world.wisps) drawWisp(ctx, w, world.time);
+  drawTrail(ctx, world);
   drawPlayer(ctx, world);
   drawParticles(ctx, world);
+  drawRings(ctx, world);
   drawFloaters(ctx, world);
   if (world.flash > 0) {
     ctx.fillStyle = `rgba(255,60,80,${world.flash * 0.32})`;
@@ -600,6 +777,7 @@ export function drawWorld(ctx, world) {
 
   if (world.screen === SCREEN_PLAY || world.screen === SCREEN_PAUSE) drawHud(ctx, world);
   drawBanner(ctx, world);
+  drawHint(ctx, world);
   if (world.screen === SCREEN_TITLE) drawTitle(ctx, world);
   if (world.screen === SCREEN_UPGRADE) drawUpgrade(ctx, world);
   if (world.screen === SCREEN_PAUSE) drawPause(ctx);
