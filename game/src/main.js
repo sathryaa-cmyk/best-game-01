@@ -11,7 +11,8 @@ import {
 } from './world.js';
 import {
   drawWorld, TITLE_BUTTON, END_AGAIN_BUTTON, END_TITLE_BUTTON,
-  PAUSE_RESUME_BUTTON, PAUSE_QUIT_BUTTON, upgradeCardRect, inside,
+  PAUSE_RESUME_BUTTON, PAUSE_QUIT_BUTTON, REROLL_BUTTON,
+  upgradeCardRect, inside,
 } from './render.js';
 import { stageShot } from './shots.js';
 
@@ -52,6 +53,10 @@ function handleScreenClick() {
     return true;
   }
   if (world.screen === SCREEN_UPGRADE) {
+    if (inside(REROLL_BUTTON, x, y)) {
+      if (world.rerollBlessings()) announce('Blessings re-dealt.');
+      return true;
+    }
     for (let i = 0; i < world.blessings.length; i += 1) {
       if (inside(upgradeCardRect(i), x, y)) {
         world.chooseBlessing(i);
@@ -114,6 +119,9 @@ function handleScreenKeys() {
     return;
   }
   if (world.screen === SCREEN_UPGRADE) {
+    if (input.wasPressed('KeyR')) {
+      if (world.rerollBlessings()) announce('Blessings re-dealt.');
+    }
     if (input.wasPressed('Digit1')) world.chooseBlessing(0);
     if (input.wasPressed('Digit2')) world.chooseBlessing(1);
     if (input.wasPressed('Digit3')) world.chooseBlessing(2);
@@ -135,6 +143,10 @@ if (shotName) {
   const seed = Number(params.get('seed') || 7) >>> 0;
   const staged = stageShot(shotName, world, seed);
   world.screen = staged.screen;
+  // A screenshot is one fixed frame: freeze the shake and hit-flash so
+  // the same seed always renders the same pixels.
+  world.shake = 0;
+  world.flash = 0;
   // Screenshot scenes render one frame and stop: no loop, no audio.
   drawWorld(ctx, world);
   window.__shotReady = true;
